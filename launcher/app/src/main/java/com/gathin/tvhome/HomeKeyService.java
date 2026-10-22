@@ -28,9 +28,36 @@ public class HomeKeyService extends AccessibilityService {
     private Map<Integer, String> appKeys = Collections.emptyMap();
     private Map<Integer, String> appScancodes = Collections.emptyMap();
 
+    /** The bound service, for the Control center's Turn off now and the sleep timer; null while unbound. */
+    private static HomeKeyService running;
+
+    /**
+     * Puts the TV into standby the way the power button does. An accessibility service may lock the screen
+     * (Android 9+), which on Android TV sends the set to sleep. False when the service is not bound, or the
+     * firmware refused: the caller then falls back to the system's own sleep action.
+     */
+    static boolean sleepNow() {
+        HomeKeyService s = running;
+        if (s == null || android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.P) return false;
+        return s.performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN);
+    }
+
+    @Override
+    public boolean onUnbind(Intent intent) {
+        running = null;
+        return super.onUnbind(intent);
+    }
+
+    @Override
+    public void onDestroy() {
+        running = null;
+        super.onDestroy();
+    }
+
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
+        running = this;
         settingsScancodes = getResources().getIntArray(R.array.settings_key_scancodes);
         // Keycodes and the panel choice can also come from a theme; theme.sh restarts this service.
         Config config = Config.load(this);

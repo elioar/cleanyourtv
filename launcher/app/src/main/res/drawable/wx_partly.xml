@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Weather in the date line: partly cloudy -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="16dp"
+    android:height="16dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:pathData="M8,2.5V4M2.5,8H4M4.1,4.1l1,1M11.9,4.1l-1,1M5.4,10.6A3.4,3.4 0,1 1,11.3 6.9M9,20h8.5a3.5,3.5 0,0 0,0.3 -7a5,5 0,0 0,-9.6 1.5A2.8,2.8 0,0 0,9 20z"
+        android:strokeWidth="1.6"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

@@ -180,6 +180,7 @@
                 android:gravity="right|bottom">
 
                 <LinearLayout
+                    android:id="@+id/dateColumn"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_gravity="bottom"
@@ -218,6 +219,7 @@
                 </LinearLayout>
 
                 <View
+                    android:id="@+id/dateSep"
                     android:layout_width="1dp"
                     android:layout_height="26dp"
                     android:layout_gravity="bottom"
@@ -277,6 +279,15 @@
                     </LinearLayout>
 
                 </LinearLayout>
+
+                <!-- Minimal home's date and weather line. Minimal home is left-to-right only (MainActivity keeps
+                     RTL menu bars on the classic Home), so this stays gone here. -->
+                <TextView
+                    android:id="@+id/subLine"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:singleLine="true"
+                    android:visibility="gone" />
             </LinearLayout>
 
             <!-- Shown only when show_stats is on. Outside leftBlock, so the top buttons stay level with the clock
@@ -308,6 +319,14 @@
                 android:clipChildren="false"
                 android:clipToPadding="false"
                 android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/btnControl"
+                    style="@style/TopButtonIcon"
+                    android:visibility="gone"
+                    android:contentDescription="@string/control_center"
+                    android:drawableStart="@drawable/ic_tune"
+                    android:nextFocusDown="@+id/grid" />
 
                 <TextView
                     android:id="@+id/btnSettings"
@@ -378,4 +397,23 @@
         android:layout_height="10dp"
         android:alpha="0"
         android:importantForAccessibility="no" />
+
+    <!-- Minimal home's button label and badges; unused while Hebrew keeps the classic Home. -->
+    <TextView
+        android:id="@+id/pillLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:visibility="gone" />
+
+    <View
+        android:id="@+id/netDot"
+        android:layout_width="11dp"
+        android:layout_height="11dp"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/ccBadge"
+        android:layout_width="wrap_content"
+        android:layout_height="15dp"
+        android:visibility="gone" />
 </FrameLayout>

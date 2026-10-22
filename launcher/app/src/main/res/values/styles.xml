@@ -6,6 +6,15 @@
         <item name="android:windowAnimationStyle">@null</item>
     </style>
 
+    <!-- Launcher settings as a side panel: Home stays visible behind it. -->
+    <style name="Theme.TvHome.SidePanel" parent="android:Theme.Material.NoActionBar.Fullscreen">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:colorBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
+
     <!-- Frosted pill, tvOS style. -->
     <style name="TopButtonBase">
         <item name="android:layout_width">wrap_content</item>

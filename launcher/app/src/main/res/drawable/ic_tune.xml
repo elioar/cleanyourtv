@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Control center: two sliders. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="22dp"
+    android:height="22dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:pathData="M4,7h9M17,7h3M4,17h3M11,17h9"
+        android:strokeWidth="1.6"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M15,5a2,2 0,1 0,0.001 0zM9,15a2,2 0,1 0,0.001 0z"
+        android:strokeWidth="1.6"
+        android:strokeColor="#FFFFFFFF" />
+</vector>

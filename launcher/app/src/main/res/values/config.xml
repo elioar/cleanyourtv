@@ -196,4 +196,13 @@
          Live TV window does not keep the screen on (CVTE): there the system screensaver would start in the
          middle of a programme. Can also be set with "home_idle_clock_minutes": 10 in a theme's config.json. -->
     <integer name="home_idle_clock_minutes">0</integer>
+
+    <!-- Minimal home (backup/launcher-design-preview.html): a thin clock with one "date · weather · city" line,
+         round icon-only buttons (Control center, Inputs, Network, Settings) named only under the focused one,
+         icon-only dark tiles with the app's own icon, the focused app's name and an info line at the top, and a
+         soft full-screen glow. false keeps the classic dock band and banners. Theme key: "minimal_home". -->
+    <bool name="minimal_home">true</bool>
+    <!-- Minimal home: the network button carries a red dot while this VPN app is installed and no VPN is up.
+         Only the dot; the button still opens the network settings. Empty: no dot. Theme key: "vpn_dot_app". -->
+    <string name="vpn_dot_app" translatable="false">ch.protonvpn.android</string>
 </resources>

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Network: three linked boxes. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="22dp"
+    android:height="22dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:pathData="M10.2,2.5h3.6a1.2,1.2 0,0 1,1.2 1.2v2.6a1.2,1.2 0,0 1,-1.2 1.2h-3.6a1.2,1.2 0,0 1,-1.2 -1.2v-2.6a1.2,1.2 0,0 1,1.2 -1.2zM3.7,16.5h3.6a1.2,1.2 0,0 1,1.2 1.2v2.6a1.2,1.2 0,0 1,-1.2 1.2h-3.6a1.2,1.2 0,0 1,-1.2 -1.2v-2.6a1.2,1.2 0,0 1,1.2 -1.2zM16.7,16.5h3.6a1.2,1.2 0,0 1,1.2 1.2v2.6a1.2,1.2 0,0 1,-1.2 1.2h-3.6a1.2,1.2 0,0 1,-1.2 -1.2v-2.6a1.2,1.2 0,0 1,1.2 -1.2zM12,7.5V12M5.5,16.5V12h13v4.5"
+        android:strokeWidth="1.6"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

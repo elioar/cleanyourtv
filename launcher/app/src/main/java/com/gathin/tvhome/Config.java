@@ -128,6 +128,14 @@ final class Config {
     final boolean ambientGlow;
     /** Minutes Home may sit untouched before the clock screensaver (config.xml, home_idle_clock_minutes); 0 is off. */
     final int homeIdleClockMinutes;
+    /** Minimal home (config.xml minimal_home): icon-only tiles, round buttons, Control center. */
+    boolean minimalHome;
+    /** The theme's columns before an on-TV Apps per row choice: minimal home's dock keeps these slots. */
+    int dockColumns;
+    /** Minimal home: VPN app whose missing VPN puts a red dot on the network button (config.xml vpn_dot_app). */
+    String vpnDotApp = "";
+    /** The on-TV wallpaper mode (HomeWallpaper): glow, photo or slideshow. */
+    String homeWallpaperMode = HomeWallpaper.MODE_GLOW;
 
     private Config(List<String> dockApps, boolean fillDock, List<String> hiddenApps, String liveTvPackage,
                    String liveTvAction, Map<String, String> launchActions, Map<String, String> appLabels,
@@ -239,6 +247,8 @@ final class Config {
         boolean cinematic = res.getBoolean(R.bool.cinematic_home);
         boolean ambientGlow = res.getBoolean(R.bool.ambient_glow);
         int idleClockMinutes = res.getInteger(R.integer.home_idle_clock_minutes);
+        boolean minimalHome = res.getBoolean(R.bool.minimal_home);
+        String vpnDotApp = res.getString(R.string.vpn_dot_app).trim();
         boolean applied = false;
 
         File dir = dir(ctx);
@@ -288,12 +298,15 @@ final class Config {
             cinematic = bool(json, "cinematic_home", cinematic);
             ambientGlow = bool(json, "ambient_glow", ambientGlow);
             idleClockMinutes = integer(json, "home_idle_clock_minutes", idleClockMinutes, 0, 1440);
+            minimalHome = bool(json, "minimal_home", minimalHome);
+            vpnDotApp = string(json, "vpn_dot_app", vpnDotApp);
         }
         // A theme push or reset invalidates choices made on the TV. On first use, remember the
         // current theme without clearing choices from an older launcher version.
         SharedPreferences choices = ctx.getSharedPreferences(SETTINGS_NAME, Context.MODE_PRIVATE);
         // Unmounted storage looks like a theme reset; compare only once the file is readable.
         if (mounted) syncThemeChoices(choices, dir, file);
+        int themeColumns = columns;
         int chosenColumns = choices.getInt("columns", columns);
         if (chosenColumns >= 4 && chosenColumns <= 7) columns = chosenColumns;
         int chosenRows = choices.getInt(ROWS_BELOW_DOCK_KEY, rowsBelow);
@@ -335,11 +348,29 @@ final class Config {
                 wallpaperEnabled = true;
             }
         }
+        // Minimal home's own wallpaper modes (launcher settings): a photo or a slideshow replaces the theme's
+        // picture; the ambient glow mode leaves everything above as it was.
+        String homeMode = choices.getString(HomeWallpaper.MODE_KEY, HomeWallpaper.MODE_GLOW);
+        if (minimalHome && !HomeWallpaper.MODE_GLOW.equals(homeMode)) {
+            List<File> own = HomeWallpaper.MODE_PHOTO.equals(homeMode)
+                    ? HomeWallpaper.photo(ctx) : HomeWallpaper.slides(ctx);
+            if (own.isEmpty()) {
+                homeMode = HomeWallpaper.MODE_GLOW;
+            } else {
+                wallpapers.clear();
+                wallpapers.addAll(own);
+                wallpaper = own.get(0);
+                wallpaperEnabled = true;
+                rotationMinutes = HomeWallpaper.MODE_PHOTO.equals(homeMode) ? 0 : HomeWallpaper.intervalMinutes(choices);
+                wallpaperDim = HomeWallpaper.dim(choices);
+                wallpaperOrder = WallpaperRotation.ORDER_SEQUENTIAL;
+            }
+        }
         // A festive skin comes only from a theme; config.xml has no festival.
         Festival festival = json == null ? Festival.NONE : Festival.parse(string(json, "festival", ""),
                 string(json, "festival_until", ""), string(json, "greeting", ""), string(json, "accent_color", ""));
 
-        return new Config(dock, fillDock, hidden, liveTv, liveTvAction, packageMap(launchActions), packageMap(appLabels),
+        Config loaded = new Config(dock, fillDock, hidden, liveTv, liveTvAction, packageMap(launchActions), packageMap(appLabels),
                 packageMap(appBanners), panelService,
                 panelAction, inputAction,
                 Math.max(1, columns), Math.max(0, rowsBelow), animations, advancedEffects,
@@ -348,6 +379,11 @@ final class Config {
                 wallpapers, rotationMinutes, wallpaperDim, wallpaperOrder, applied,
                 festival, inputKeycodes, appKeys, json == null ? Collections.emptyList() : raceCalendar(json), cinematic, ambientGlow,
                 Math.max(0, idleClockMinutes));
+        loaded.minimalHome = minimalHome;
+        loaded.dockColumns = Math.max(1, themeColumns);
+        loaded.vpnDotApp = vpnDotApp;
+        loaded.homeWallpaperMode = homeMode;
+        return loaded;
     }
 
     /**

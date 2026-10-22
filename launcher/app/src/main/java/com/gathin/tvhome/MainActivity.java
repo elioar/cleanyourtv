@@ -47,6 +47,7 @@ import android.text.Spanned;
 import android.text.TextPaint;
 import android.text.TextUtils;
 import android.text.style.ForegroundColorSpan;
+import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -93,8 +94,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private static final int LAUNCHER_SETTINGS_REQUEST = 42;
     /** Sent by QuickSettingsActivity: open Launcher settings from here so Home rebuilds when they close. */
     static final String ACTION_LAUNCHER_SETTINGS = "com.gathin.tvhome.action.LAUNCHER_SETTINGS";
+    static final String EXTRA_WEATHER_PLACE = "weather_place";
     /** Tiles per row and dock slots (res/values/config.xml, columns). Set in onCreate. */
     static int COLUMNS = 4;
+    private static final String TAG = "TvHome";
     private boolean rtlAppGrid;
     private static final long MINUTE_MS = 60_000L;
     private static final long STATS_MS = 10_000L;
@@ -230,6 +233,61 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private boolean libraryFocusPending;
     private RecyclerView.OnScrollListener pendingFocusScroll;
 
+    // ---- minimal home (config.xml minimal_home, backup/launcher-design-preview.html) ----
+    /** Icon-only tiles, round buttons named under the focused one, Control center, name and info line on top. */
+    private boolean minimalHome;
+    private TextView btnControl;
+    private TextView pillLabel;
+    /** Sleep-timer minutes and the VPN dot, drawn as a layer of the buttons' backgrounds. */
+    private PillBadge ccBadge;
+    private TextView subLine;
+    private PillBadge netDot;
+    private View topButtons;
+    private View headerBlock;
+    private AppInfoLine infoLine;
+    private String vpnDotApp = "";
+    /** A VPN is up (any app's), as last seen by updateWifiLabel. */
+    private boolean vpnUp;
+    /** The network button's spoken and shown name: "Ethernet · VPN off". */
+    private String networkLabel = "";
+    /** A photo or slideshow is behind Home: the glow is kept faint. */
+    private boolean minimalWallpaper;
+    /** Where minimal home parks the dock's tiles, the grid row in focus, and the top shelf for each (dp). */
+    private static final float MIN_DOCK_TOP_DP = 211, MIN_ROW_TOP_DP = 186, MIN_HERO_DOCK_DP = 112, MIN_HERO_GRID_DP = 60;
+    private static final float MIN_DOCK_GAP_DP = 14;
+    // ---- minimal home, phase 2: content rows, hero, weather ----
+    private ContentRows contentRows;
+    private MovieHero movieHero;
+    private HomeFeeds feeds;
+    private ImageLoader images;
+    private android.content.SharedPreferences homeSettings;
+    private boolean heroOn;
+    /** Focus is on a content card: header, dock and app shelf step aside for the hero. */
+    private boolean contentMode;
+    /** Minimal home's All apps page (AllAppsPage), made on first use; Apps per row sets its columns. */
+    private AllAppsPage allApps;
+    private int allAppsColumns;
+    /** Height of the content rows, the gap the first grid row leaves for them. */
+    private int contentHeight;
+    private HomeFeeds.Weather weather;
+    /** Now on TV: read from the TV's guide when Home opens and every TV_REFRESH_MS while it stays open. */
+    private NowOnTv nowOnTv;
+    private static final long TV_REFRESH_MS = 3 * 60_000L;
+    private final Runnable tvTick = new Runnable() {
+        @Override
+        public void run() {
+            loadNowOnTv();
+            handler.postDelayed(this, TV_REFRESH_MS);
+        }
+    };
+    /** The 5-day forecast under the weather in the date line, while it is open. */
+    private PopupWindow forecastPopup;
+    /** The dock tile focus last left from, so Up from the rows returns there. */
+    private int lastDockCol;
+    private Runnable pendingHero;
+    /** Where a focused content row's label sits on screen (dp), under the hero's text. */
+    private static final float MIN_CONTENT_ROW_DP = 268;
+
     private final Handler handler = new Handler(Looper.getMainLooper());
     /** Refreshes the network pill when the connection changes: at boot Wi-Fi often connects after Home is shown. */
     private final ConnectivityManager.NetworkCallback networkCallback = new ConnectivityManager.NetworkCallback() {
@@ -292,6 +350,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             updateGreeting();
             updateRace();
             updateWifiLabel();
+            if (minimalHome) {
+                updateSubLine();
+                updateCcBadge();
+                if (feeds != null) feeds.refresh(false);   // each feed fetches only when its interval is up
+            }
             sky.update();
             wallpaperPlayer.update();
             handler.postDelayed(this, MINUTE_MS);
@@ -320,6 +383,19 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         inputAction = cfg.inputAction;
         sourcePanelService = cfg.sourcePanelService;
         sourcePanelAction = cfg.sourcePanelAction;
+        // The Hebrew layout has no minimal-home views yet: it keeps the classic home.
+        // Minimal home is laid out left to right only: RTL menu bars (Hebrew) keep the classic Home.
+        minimalHome = cfg.minimalHome && findViewById(R.id.btnControl) != null
+                && !getResources().getBoolean(R.bool.rtl_menu_bar);
+        minimalWallpaper = minimalHome && cfg.wallpaperEnabled && !cfg.wallpapers.isEmpty();
+        AppAdapter.minimal = minimalHome;
+        AppAdapter.minimalOverWallpaper = minimalWallpaper;
+        // Minimal home has no app grid, only the dock. The dock keeps the theme's slots; Apps per row sets the
+        // All apps page instead.
+        AppAdapter.dockOnly = minimalHome;
+        allAppsColumns = cfg.columns;
+        if (minimalHome) COLUMNS = cfg.dockColumns;
+        vpnDotApp = cfg.vpnDotApp;
 
         root = findViewById(R.id.root);
         root.setBackgroundColor(cfg.backgroundColor);
@@ -397,6 +473,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             public boolean requestChildRectangleOnScreen(@NonNull RecyclerView parent, @NonNull View child,
                                                          @NonNull Rect rect, boolean immediate,
                                                          boolean focusedChildVisible) {
+                if (minimalHome) return false;   // minimalFocus parks every row itself
                 if (dockRow && getPosition(child) < COLUMNS) return false;
                 int top = child.getTop() + rect.top;
                 int bottom = top + rect.height();
@@ -431,7 +508,20 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             public void onChildViewDetachedFromWindow(@NonNull View v) {
             }
         });
-        if (dockRow) grid.addItemDecoration(new DockDecoration(COLUMNS, density, cinematic, cfg.alwaysShowNames));
+        if (minimalHome) {
+            // No band behind the dock: only a slightly larger gap between it and the grid.
+            grid.addItemDecoration(new RecyclerView.ItemDecoration() {
+                @Override
+                public void getItemOffsets(@NonNull Rect out, @NonNull View v, @NonNull RecyclerView parent,
+                                           @NonNull RecyclerView.State state) {
+                    int pos = parent.getChildAdapterPosition(v);
+                    if (pos >= 0 && pos < COLUMNS) out.bottom = (int) (MIN_DOCK_GAP_DP * density);
+                    else if (pos >= COLUMNS && pos < 2 * COLUMNS) out.top = contentHeight;
+                }
+            });
+        } else if (dockRow) {
+            grid.addItemDecoration(new DockDecoration(COLUMNS, density, cinematic, cfg.alwaysShowNames));
+        }
         if (animations) {
             int enterAnim = reducedMotion ? R.anim.tile_enter_reduced : R.anim.tile_enter;
             float enterDelay = reducedMotion ? 0f : 0.06f;
@@ -449,6 +539,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         int rowsBelowDock = cfg.rowsBelowDock;
         grid.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
             int h = b - t;
+            if (minimalHome) {
+                layoutMinimalGrid(r - l, h);
+                return;
+            }
             // Item height follows the tile size, which follows the columns and the rows that must fit (AppAdapter.tileWidthPx).
             int inner = (r - l) - grid.getPaddingLeft() - grid.getPaddingRight();
             int tileW = AppAdapter.tileWidthPx(inner, h, COLUMNS, rowsBelowDock, cfg.dockTitle, cfg.dockRow, density);
@@ -476,6 +570,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         grid.addOnScrollListener(new RecyclerView.OnScrollListener() {
             @Override
             public void onScrolled(@NonNull RecyclerView rv, int dx, int dy) {
+                if (contentRows != null) placeContentRows();
                 if (!glassShown) return;
                 glassTargetY -= dy;
                 glassScrollShift -= dy;
@@ -550,9 +645,16 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 focusTile(lastFocused % COLUMNS);
                 return true;
             }
-            int firstButton = btnInputs.getVisibility() == View.VISIBLE ? R.id.btnInputs : firstTopButton().getId();
-            int leftButton = rtlMenuBar ? R.id.btnSettings : firstButton;
-            int rightButton = rtlMenuBar ? firstButton : R.id.btnSettings;
+            int firstButton = minimalHome ? R.id.btnControl
+                    : btnInputs.getVisibility() == View.VISIBLE ? R.id.btnInputs : firstTopButton().getId();
+            int lastButton = minimalHome ? R.id.btnLibraryTop : R.id.btnSettings;
+            int leftButton = rtlMenuBar ? lastButton : firstButton;
+            int rightButton = rtlMenuBar ? firstButton : lastButton;
+            if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT && minimalHome && v.getId() == leftButton && !rtlMenuBar
+                    && subLine != null && subLine.isFocusable()) {
+                subLine.requestFocus();
+                return true;
+            }
             if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) return v.getId() == leftButton;
             return keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && v.getId() == rightButton;
         };
@@ -569,6 +671,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             }
         }
         if (festive) applyFestiveSkin((TextView) btnInputs, (TextView) btnSettings);
+        if (minimalHome) setUpMinimalHome(cfg, (TextView) btnSettings, pillKeys);
 
         // Hide the glass when focus leaves the tiles.
         getWindow().getDecorView().getViewTreeObserver().addOnGlobalFocusChangeListener((oldF, newF) -> {
@@ -598,6 +701,13 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     private boolean openLauncherSettingsIfAsked(Intent intent) {
         if (intent == null || !ACTION_LAUNCHER_SETTINGS.equals(intent.getAction())) return false;
+        // Set up over adb: am start -a com.gathin.tvhome.action.LAUNCHER_SETTINGS --es weather_place "Name=lat,lon"
+        String[] place = HomeFeeds.parsePlace(intent.getStringExtra(EXTRA_WEATHER_PLACE));
+        if (place != null) {
+            getSharedPreferences(Config.SETTINGS_NAME, MODE_PRIVATE).edit()
+                    .putString(HomeFeeds.WEATHER_PLACE, place[1] + "|" + place[2] + "|" + place[3]).apply();
+            if (feeds != null) feeds.refresh(true);
+        }
         setIntent(new Intent(Intent.ACTION_MAIN));
         startActivityForResult(new Intent(this, LauncherSettingsActivity.class), LAUNCHER_SETTINGS_REQUEST);
         return true;
@@ -613,7 +723,9 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         super.onNewIntent(intent);
         if (openLauncherSettingsIfAsked(intent)) return;
         if (intent == null || !intent.hasCategory(Intent.CATEGORY_HOME)) return;
+        if (allApps != null && allApps.showing()) allApps.close();
         grid.scrollToPosition(0);
+        if (contentRows != null) contentRows.resetPositions();
         lastFocused = 0;
         lastFocusedKey = adapter.getItemCount() > 0 ? adapter.keyAt(0) : null;
         if (stopped) {
@@ -658,6 +770,20 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         rebuildOnResume = false;
         updateGreeting();
         updateRace();
+        if (minimalHome) {
+            updateSubLine();
+            updateCcBadge();
+            // Usage history changed while an app was open: refresh the line under the focused app's name.
+            infoLine.refresh(() -> {
+                if (!isDestroyed() && heroShown) updateMinimalInfo(lastFocused);
+            });
+            if (feeds != null) {
+                feeds.refresh(false);
+                feeds.refreshSlidesIfDue();
+            }
+            handler.removeCallbacks(tvTick);
+            if (nowOnTv != null) tvTick.run();
+        }
         // The network and Inputs pills keep their state while Home is in the background, and callbacks update them
         // when the network or the inputs change, so this refresh only catches anything missed. Its binder calls
         // (about 7 ms on a TCL C755, most of it WifiManager.getConnectionInfo) would hold up the first frame back
@@ -785,6 +911,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     protected void onPause() {
         super.onPause();
         root.removeCallbacks(showIdleClock);
+        if (pendingHero != null) handler.removeCallbacks(pendingHero);
         endReorder();   // Home or another app while reordering keeps the order so far
         wallpaperPlayer.stop();
         stopAmbientAnimation();
@@ -792,6 +919,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         ambient.animate().cancel();
         heroArt.animate().cancel();
         handler.removeCallbacks(minuteTick);
+        handler.removeCallbacks(tvTick);
+        if (forecastPopup != null) forecastPopup.dismiss();
         stopStats();
         if (diya != null) diya.stop();
         cancelPendingFocusScroll();
@@ -826,6 +955,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 || level == TRIM_MEMORY_RUNNING_LOW || level == TRIM_MEMORY_RUNNING_CRITICAL;
         if (!due || started) return;
         adapter.clear();
+        if (images != null) images.trimMemory();
+        if (movieHero != null) movieHero.release();
         // Detach the adapter too: with Home stopped no layout pass runs, so the tile views (and the bitmaps
         // they hold) would stay attached until Home comes back. setAdapter(null) recycles them now.
         grid.setAdapter(null);
@@ -848,6 +979,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     protected void onDestroy() {
         super.onDestroy();
         wallpaperPlayer.close();
+        if (infoLine != null) infoLine.close();
+        if (feeds != null) feeds.close();
+        if (nowOnTv != null) nowOnTv.close();
+        if (images != null) images.close();
+        if (movieHero != null) movieHero.close();
         ConnectivityManager cm = getSystemService(ConnectivityManager.class);
         TvInputManager tim = (TvInputManager) getSystemService(TV_INPUT_SERVICE);
         if (tim != null) tim.unregisterCallback(inputCallback);
@@ -1046,6 +1182,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     /** A tile's alpha: dim unless it is the carried one, or, in edit-dock mode, a dock tile other than the chosen place. */
     private float tileAlpha(int pos) {
+        // Minimal home: the dock steps aside while a content row has focus (the hero takes the top).
+        if (contentMode && pos >= 0 && pos < COLUMNS) return 0f;
         if (movingKey != null) {
             return pos != RecyclerView.NO_POSITION && movingKey.equals(adapter.keyAt(pos)) ? 1f : 0.45f;
         }
@@ -1139,7 +1277,15 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     @Override
     public void onBackPressed() {
-        // Home screen: Back goes nowhere.
+        // Home screen: Back goes nowhere, except that on minimal home it brings focus back up to the dock from the
+        // content rows or the grid.
+        if (!minimalHome) return;
+        if (allApps != null && allApps.showing()) {
+            allApps.close();
+            return;
+        }
+        boolean inGrid = grid.hasFocus() && lastFocused >= COLUMNS;
+        if (contentMode || inGrid) focusTile(Math.min(lastDockCol, COLUMNS - 1));
     }
 
     // ---- glass highlight -------------------------------------------------------------------------
@@ -1177,6 +1323,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             card.post(() -> {
                 if (card.isFocused() && card.getWidth() > 0) onTileFocused(position, card);
             });
+            return;
+        }
+        if (minimalHome) {
+            minimalFocus(position, card);
             return;
         }
         // Tile rect in root coordinates, using layout positions (ignores the scale animation).
@@ -1249,7 +1399,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     /** Refits the glass to the focused holder once the grid layout and tile dimensions settle. */
     private void refitGlass() {
-        if (isDestroyed() || adapter.appCount() == 0 || libraryFocusPending) return;
+        if (minimalHome || isDestroyed() || adapter.appCount() == 0 || libraryFocusPending) return;
         int pos = Math.max(0, Math.min(lastFocused, adapter.appCount() - 1));
         RecyclerView.ViewHolder vh = grid.findViewHolderForAdapterPosition(pos);
         View card = vh == null ? null : vh.itemView.findViewById(R.id.card);
@@ -1331,6 +1481,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     /** The shelf's text for this dock app: its name and, on the cinematic shelf, "Last opened" and the dots. */
     private void fillHero(int position, String label) {
         heroName.setText(label);
+        if (minimalHome) {
+            updateMinimalInfo(position);
+            return;
+        }
         if (!cinematic) return;
         updateHeroMeta(position);
         updateHeroDots(position);
@@ -1468,7 +1622,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             Bitmap bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
             Canvas canvas = new Canvas(bmp);
             Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            if (cinematic) {
+            if (minimalHome) {
+                // A soft wash over the whole screen: a broad pool top left and a second one rising from the
+                // bottom right, as in the design preview. Fainter over a wallpaper.
+                int a = minimalWallpaper ? 0x1A : 0x3D;
+                paint.setShader(new RadialGradient(w * 0.25f, h * 0.30f, w * 0.72f,
+                        new int[]{a << 24 | 0xFFFFFF, (a / 2) << 24 | 0xFFFFFF, 0x00FFFFFF},
+                        new float[]{0f, 0.45f, 1f}, Shader.TileMode.CLAMP));
+                canvas.drawRect(0, 0, w, h, paint);
+                paint.setShader(new RadialGradient(w * 0.90f, h * 1.05f, w * 0.55f,
+                        new int[]{a << 24 | 0xFFFFFF, (a / 2) << 24 | 0xFFFFFF, 0x00FFFFFF},
+                        new float[]{0f, 0.45f, 1f}, Shader.TileMode.CLAMP));
+            } else if (cinematic) {
                 // Higher and stronger, from the corner away from the shelf's text: the app's colour floods
                 // the top of the screen over its artwork, and the scrim keeps the text side dark.
                 boolean rtl = getResources().getBoolean(R.bool.rtl_menu_bar);
@@ -1756,6 +1921,19 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     @Override
     public boolean onTileVerticalKey(int position, int keyCode) {
+        if (contentRows != null && contentRows.rowCount() > 0 && !reordering) {
+            if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN && position < COLUMNS) {
+                if (contentRows.focusRow(0)) {
+                    grid.playSoundEffect(SoundEffectConstants.NAVIGATION_DOWN);
+                    return true;
+                }
+            } else if (keyCode == KeyEvent.KEYCODE_DPAD_UP && position >= COLUMNS && position < 2 * COLUMNS) {
+                if (contentRows.focusRow(contentRows.rowCount() - 1)) {
+                    grid.playSoundEffect(SoundEffectConstants.NAVIGATION_UP);
+                    return true;
+                }
+            }
+        }
         int count = adapter.appCount();
         int target;
         // Horizontal: swallow the key at a row's ends so focus never wraps to the next row or
@@ -2051,7 +2229,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         }
         // With a VPN app configured, a VPN that is down matters too: show a red "VPN off" capsule then.
         boolean vpnDown = !vpn && online && !vpnApp.isEmpty();
-        if (vpn || vpnDown) {
+        if (!minimalHome && (vpn || vpnDown)) {
             // Network name, then the green lock-and-VPN (or red "VPN off") capsule drawn in place of the word.
             String badge = getString(vpn ? R.string.vpn : R.string.vpn_off);
             VpnBadge span = new VpnBadge(vpn ? getDrawable(R.drawable.ic_lock) : null, density);
@@ -2072,7 +2250,16 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         } else if (!TextUtils.equals(btnWifi.getText(), text)) {
             btnWifi.setText(text);
         }
-        if (wifiIconOnly) {
+        if (minimalHome) {
+            vpnUp = vpn;
+            String net = text.isEmpty() ? getString(R.string.network) : text;
+            boolean dotApp = !vpnDotApp.isEmpty() && installed(vpnDotApp);
+            networkLabel = dotApp && online ? getString(vpn ? R.string.net_label_vpn_on : R.string.net_label_vpn_off, net) : net;
+            netDot.setDot(dotApp && online && !vpn);
+            btnWifi.setContentDescription(networkLabel);
+            btnWifi.setText(null);
+            if (btnWifi.isFocused()) showPillLabel(btnWifi);
+        } else if (wifiIconOnly) {
             btnWifi.setContentDescription(btnWifi.getText());
             btnWifi.setText(null);
         }
@@ -2257,6 +2444,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         // The BYINTEK U4 needs this, as its TvInputManager lists three HDMI ports and an AV input it doesn't have.
         if (!sourcePanelService.isEmpty() && liveTvIntent() == null) {
             openSourcePanel();
+            return;
+        }
+        if (minimalHome) {
+            showInputMenu();
             return;
         }
         View anchor = findViewById(R.id.btnInputs);
@@ -2671,5 +2862,1084 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             default:
                 return getString(R.string.card_state_new);
         }
+    }
+
+    // ---- minimal home ----------------------------------------------------------------------------
+
+    /** Header, round buttons, badges and the shelf, once in onCreate. */
+    private void setUpMinimalHome(Config cfg, TextView btnSettings, View.OnKeyListener pillKeys) {
+        infoLine = new AppInfoLine(this);
+        glass.setVisibility(View.GONE);   // the focused tile draws its own ring
+        // Side room for the focus zoom before the first layout: tiles take their size from it when created.
+        int side = Math.round(8 * density);
+        grid.setPadding(side, grid.getPaddingTop(), side, grid.getPaddingBottom());
+        btnControl = findViewById(R.id.btnControl);
+        pillLabel = findViewById(R.id.pillLabel);
+        android.graphics.Typeface badgeFont = getResources().getFont(R.font.outfit_medium);
+        ccBadge = new PillBadge(density, badgeFont);
+        netDot = new PillBadge(density, badgeFont);
+        subLine = findViewById(R.id.subLine);
+        topButtons = findViewById(R.id.topButtons);
+        headerBlock = (View) topButtons.getParent();
+        pillLabel.setVisibility(View.VISIBLE);
+
+        // Header: no greeting, a thinner clock, and one quiet line under it instead of the date column.
+        greeting.setVisibility(View.GONE);
+        findViewById(R.id.dateSep).setVisibility(View.GONE);
+        findViewById(R.id.dateColumn).setVisibility(View.GONE);
+        TextView clock = findViewById(R.id.clock);
+        clock.setTextSize(TypedValue.COMPLEX_UNIT_SP, 44f);
+        subLine.setVisibility(View.VISIBLE);
+        // The buttons sit level with the clock's top, not its baseline.
+        android.widget.RelativeLayout.LayoutParams tb = (android.widget.RelativeLayout.LayoutParams) topButtons.getLayoutParams();
+        tb.removeRule(android.widget.RelativeLayout.ALIGN_BOTTOM);
+        tb.addRule(android.widget.RelativeLayout.ALIGN_TOP, R.id.leftBlock);
+        tb.topMargin = Math.round(4 * density);
+        tb.bottomMargin = 0;
+        topButtons.setLayoutParams(tb);
+
+        // Shelf: the focused app's name, smaller and lighter, with the info line under it.
+        heroName.setTextSize(TypedValue.COMPLEX_UNIT_SP, 32f);
+        heroMeta.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
+        heroMeta.setTextColor(0x9EFFFFFF);
+        heroMeta.setVisibility(View.INVISIBLE);
+        ((LinearLayout.LayoutParams) heroMeta.getLayoutParams()).topMargin = Math.round(10 * density);
+        heroDots.setVisibility(View.GONE);
+        ((FrameLayout.LayoutParams) hero.getLayoutParams()).setMarginStart(Math.round(58 * density));
+
+        // Round, icon-only buttons; the name shows under the focused one.
+        btnControl.setVisibility(View.VISIBLE);
+        btnControl.setOnClickListener(v -> showControlCenter());
+        btnControl.setOnKeyListener(pillKeys);
+        // All apps: the last round button, after Settings.
+        TextView btnAllApps = (TextView) btnLibraryTop;
+        ((ViewGroup) topButtons).removeView(btnAllApps);
+        ((ViewGroup) topButtons).addView(btnAllApps);
+        btnAllApps.setVisibility(View.VISIBLE);
+        btnAllApps.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_all_apps, 0, 0, 0);
+        btnAllApps.setContentDescription(getString(R.string.all_apps));
+        btnAllApps.setOnClickListener(v -> showAllApps());
+        btnSettings.setNextFocusRightId(R.id.btnLibraryTop);
+        for (TextView pill : new TextView[]{btnControl, (TextView) btnInputs, btnWifi, btnSettings, btnAllApps}) {
+            if (pill != btnControl && pill != btnAllApps) makeIconOnly(pill);
+            Drawable bg = getDrawable(R.drawable.minimal_pill_bg);
+            PillBadge badge = pill == btnControl ? ccBadge : pill == btnWifi ? netDot : null;
+            pill.setBackground(badge == null ? bg : new android.graphics.drawable.LayerDrawable(new Drawable[]{bg, badge}));
+            ViewGroup.MarginLayoutParams lp = (ViewGroup.MarginLayoutParams) pill.getLayoutParams();
+            int size = Math.round(40 * density);
+            lp.width = size;
+            lp.height = size;
+            lp.setMarginStart(Math.round(12 * density));
+            pill.setLayoutParams(lp);
+            int pad = Math.round(9 * density);
+            pill.setPaddingRelative(pad, 0, pad, 0);
+            pill.setCompoundDrawablePadding(0);
+            View.OnFocusChangeListener previous = pill.getOnFocusChangeListener();
+            pill.setOnFocusChangeListener((v, focused) -> {
+                if (previous != null) previous.onFocusChange(v, focused);
+                if (focused) showPillLabel((TextView) v);
+                else if (!anyPillFocused()) hidePillLabel();
+            });
+        }
+        wifiIconOnly = true;
+        setUpContent();
+        setUpWeatherFocus();
+    }
+
+    private boolean anyPillFocused() {
+        View f = getCurrentFocus();
+        return f != null && f.getParent() == topButtons;
+    }
+
+    /** The focused round button's name, centred under it ("Control center", "Ethernet · VPN off"). */
+    private void showPillLabel(TextView pill) {
+        if (pillLabel == null) return;
+        CharSequence text = pill == btnWifi ? networkLabel : pill.getContentDescription();
+        pillLabel.setText(text);
+        pillLabel.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+        Rect r = new Rect(0, 0, pill.getWidth(), pill.getHeight());
+        root.offsetDescendantRectToMyCoords(pill, r);
+        float x = r.exactCenterX() - pillLabel.getMeasuredWidth() / 2f;
+        // Keep it on screen at the right edge (Settings is the last button).
+        x = Math.min(x, root.getWidth() - pillLabel.getMeasuredWidth() - 12 * density);
+        pillLabel.setX(x);
+        pillLabel.setY(r.bottom + 9 * density);
+        pillLabel.animate().cancel();
+        if (animations) pillLabel.animate().alpha(1f).setDuration(160).start();
+        else pillLabel.setAlpha(1f);
+    }
+
+    private void hidePillLabel() {
+        if (pillLabel == null) return;
+        pillLabel.animate().cancel();
+        if (animations) pillLabel.animate().alpha(0f).setDuration(120).start();
+        else pillLabel.setAlpha(0f);
+    }
+
+    private boolean installed(String pkg) {
+        try {
+            getPackageManager().getApplicationInfo(pkg, 0);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** "Wednesday 21 October", later followed by the weather and the city. */
+    private void updateSubLine() {
+        if (subLine == null) return;
+        String pattern = android.text.format.DateFormat.getBestDateTimePattern(Locale.getDefault(), "EEEEdMMMM");
+        String date = android.text.format.DateFormat.format(pattern, System.currentTimeMillis()).toString();
+        android.text.SpannableStringBuilder line = new android.text.SpannableStringBuilder(date);
+        if (weather != null && homeSettings != null && HomeFeeds.on(homeSettings, HomeFeeds.WEATHER_ON)) {
+            line.append("   \u00B7   ");
+            int at = line.length();
+            line.append("\u2600");
+            Drawable icon = getDrawable(weatherIcon(weather.code, weather.day));
+            int s = Math.round(15 * density);
+            icon.setBounds(0, 0, s, s);
+            line.setSpan(new android.text.style.ImageSpan(icon, android.text.style.DynamicDrawableSpan.ALIGN_BOTTOM),
+                    at, at + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            int t = line.length();
+            line.append(" ").append(String.valueOf(weather.temperature)).append("\u00B0");
+            line.setSpan(new ForegroundColorSpan(0xFFFFFFFF), t, line.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            line.append("   \u00B7   ").append(weather.city);
+        }
+        if (!TextUtils.equals(subLine.getText().toString(), line.toString())) subLine.setText(line);
+    }
+
+    private void updateCcBadge() {
+        if (ccBadge == null) return;
+        int left = SleepTimer.minutesLeft(this);
+        ccBadge.setLabel(left > 0 ? String.valueOf(left) : null);
+    }
+
+    /** The line under the focused app's name: Playing now, Last opened, or the VPN's state. */
+    private void updateMinimalInfo(int position) {
+        if (infoLine == null) return;
+        String line = infoLine.describe(adapter.packageAt(position), vpnDotApp, vpnUp);
+        heroMeta.setText(line);
+        heroMeta.setVisibility(line.isEmpty() ? View.INVISIBLE : View.VISIBLE);
+    }
+
+    /** Grid padding: the dock's tiles start at MIN_DOCK_TOP_DP on screen; the last row can still scroll up to MIN_ROW_TOP_DP. */
+    private void layoutMinimalGrid(int width, int height) {
+        int[] g = new int[2], rt = new int[2];
+        grid.getLocationInWindow(g);
+        root.getLocationInWindow(rt);
+        int gridTop = g[1] - rt[1];
+        // Room at the sides for the focused tile's zoom: the wrapper clips at the grid's edge.
+        int side = Math.round(8 * density);
+        int inner = width - 2 * side;
+        int itemH = AppAdapter.itemHeightPx(AppAdapter.tileHeightPx(AppAdapter.tileWidthPx(inner, COLUMNS, density)), true, density);
+        int itemPad = Math.round(AppAdapter.MINIMAL_GAP_DP / 2f * density);
+        int top = Math.max(0, Math.round(MIN_DOCK_TOP_DP * density) - gridTop - itemPad);
+        int rowTop = Math.round(MIN_ROW_TOP_DP * density) - gridTop - itemPad;
+        int bottom = Math.max(Math.round(40 * density), height - rowTop - itemH);
+        // Only the dock is in the grid: the content rows under it need the room to scroll up past it.
+        if (AppAdapter.dockOnly) bottom = height;
+        if (grid.getPaddingTop() != top || grid.getPaddingBottom() != bottom || grid.getPaddingLeft() != side) {
+            grid.setPadding(side, top, side, bottom);
+        }
+    }
+
+    /**
+     * Focus on a minimal tile: the dock parks at its place under the header; a grid row slides up to just under
+     * the shelf, and the clock and buttons step aside for it. The name and info line show for either.
+     */
+    private void minimalFocus(int position, View card) {
+        View item = (View) card.getParent();
+        boolean dock = dockRow && position < COLUMNS;
+        if (dock) lastDockCol = position;
+        leaveContentMode(dock);
+        int[] g = new int[2], rt = new int[2];
+        grid.getLocationInWindow(g);
+        root.getLocationInWindow(rt);
+        int gridTop = g[1] - rt[1];
+        int itemPad = Math.round(AppAdapter.MINIMAL_GAP_DP / 2f * density);
+        int target = dock ? grid.getPaddingTop()
+                : Math.round(MIN_ROW_TOP_DP * density) - gridTop - itemPad;
+        grid.stopScroll();
+        int dy = item.getTop() - target;
+        if (Math.abs(dy) > 2 * density) {
+            if (!animations || reducedMotion) grid.scrollBy(0, dy);
+            else grid.smoothScrollBy(0, dy);
+        }
+        // In the grid, rows above the focused one (the dock among them) slide away under a clip line just
+        // above it, so they never sit half-cut under the app's name.
+        View wrapper = (View) grid.getParent();
+        if (dock) {
+            wrapper.setClipBounds(null);
+        } else {
+            int clipTop = grid.getTop() + target + itemPad - Math.round(7 * density);
+            wrapper.setClipBounds(new Rect(0, Math.max(0, clipTop), wrapper.getWidth(), wrapper.getHeight()));
+        }
+        float headerAlpha = dock ? 1f : 0f;
+        if (headerBlock.getAlpha() != headerAlpha) {
+            headerBlock.animate().cancel();
+            if (!animations) headerBlock.setAlpha(headerAlpha);
+            else headerBlock.animate().alpha(headerAlpha).setDuration(reducedMotion ? 120 : 260).withLayer().start();
+        }
+        // showHero places the shelf above the "dock top" it is given; hand it the spot that puts the name at
+        // MIN_HERO_*_DP.
+        float heroY = (dock ? MIN_HERO_DOCK_DP : MIN_HERO_GRID_DP) * density;
+        if (heroShown && hero.getY() != heroY && hero.getHeight() > 0) {
+            hero.animate().cancel();
+            if (animations && !reducedMotion) hero.animate().y(heroY).setDuration(260).start();
+            else hero.setY(heroY);
+        }
+        showHero(position, heroY + 40 * density + hero.getHeight());
+    }
+
+    // ---- content rows, hero and weather (phase 2) -------------------------------------------------
+
+    private void setUpContent() {
+        homeSettings = getSharedPreferences(Config.SETTINGS_NAME, MODE_PRIVATE);
+        heroOn = HomeFeeds.on(homeSettings, HomeFeeds.ROW_HERO);
+        images = new ImageLoader(this);
+        movieHero = new MovieHero(this, images, animations, reducedMotion);
+        // The backdrop goes just above the glow, under everything else.
+        root.addView(movieHero.backdrop, root.indexOfChild(ambient) + 1, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        View main = (View) headerBlock.getParent();
+        contentRows = new ContentRows(this, images, contentListener, animations);
+        contentRows.setPadding(Math.round(72 * density), 0, 0, 0);
+        root.addView(contentRows, root.indexOfChild(main) + 1, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        FrameLayout.LayoutParams tlp = new FrameLayout.LayoutParams(Math.round(420 * density),
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        tlp.leftMargin = Math.round(58 * density);
+        tlp.topMargin = Math.round(46 * density);
+        root.addView(movieHero.text, root.indexOfChild(contentRows) + 1, tlp);
+        root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            if (r - l != or - ol || b - t != ob - ot) movieHero.layout(r - l, b - t);
+        });
+        // The first grid row keeps a gap the height of the rows; it follows them as they fill in.
+        contentRows.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            int h = contentRows.rowCount() == 0 ? 0 : b - t;
+            if (h != contentHeight) {
+                contentHeight = h;
+                grid.invalidateItemDecorations();
+            }
+            placeContentRows();
+        });
+        boolean tvRow = HomeFeeds.on(homeSettings, HomeFeeds.ROW_TV);
+        contentRows.setEnabledRows(HomeFeeds.on(homeSettings, HomeFeeds.ROW_STREMIO), tvRow,
+                HomeFeeds.on(homeSettings, HomeFeeds.ROW_NEWS));
+        if (tvRow) nowOnTv = new NowOnTv(this);
+        feeds = new HomeFeeds(this, feedListener);
+        feeds.showCached();
+    }
+
+    private final HomeFeeds.Listener feedListener = new HomeFeeds.Listener() {
+        @Override
+        public void onWeather(HomeFeeds.Weather w) {
+            weather = w;
+            updateSubLine();
+            updateWeatherFocus();
+        }
+
+        @Override
+        public void onStremio(List<HomeFeeds.Movie> continueWatching, List<HomeFeeds.Movie> trending) {
+            contentRows.setStremio(continueWatching, trending);
+        }
+
+        @Override
+        public void onNews(List<HomeFeeds.News> items, String label) {
+            contentRows.setNews(items, label);
+        }
+    };
+
+    /** Keeps the rows under the dock as the grid scrolls; out of sight once the dock has scrolled away. */
+    private void placeContentRows() {
+        // Anchored on the first grid row (the rows sit in the gap above it), or on the dock when that row is not
+        // laid out; with neither on screen the rows are out of sight anyway.
+        RecyclerView.ViewHolder below = adapter.appCount() > COLUMNS ? grid.findViewHolderForAdapterPosition(COLUMNS) : null;
+        if (below != null) {
+            Rect r = new Rect(0, 0, below.itemView.getWidth(), below.itemView.getHeight());
+            root.offsetDescendantRectToMyCoords(below.itemView, r);
+            contentRows.setTranslationY(r.top - contentHeight);
+            return;
+        }
+        RecyclerView.ViewHolder dock = grid.findViewHolderForAdapterPosition(0);
+        if (dock == null) {
+            contentRows.setTranslationY(-root.getHeight());
+            return;
+        }
+        Rect r = new Rect(0, 0, dock.itemView.getWidth(), dock.itemView.getHeight());
+        root.offsetDescendantRectToMyCoords(dock.itemView, r);
+        contentRows.setTranslationY(r.bottom + MIN_DOCK_GAP_DP * density);
+    }
+
+    private final ContentRows.Listener contentListener = new ContentRows.Listener() {
+        @Override
+        public void onCardFocused(int kind, Object item, int index) {
+            enterContentMode();
+            int row = contentRows.focusedRow();
+            if (row >= 0) {
+                // The focused row's label settles under the hero's text; rows above it fade away. A scroll still
+                // running from the previous key stops first, so this one is planned from where things really are.
+                grid.stopScroll();
+                placeContentRows();
+                View rv = contentRows.rowView(row);
+                float rowTop = contentRows.getTranslationY() + rv.getTop();
+                int dy = Math.round(rowTop - MIN_CONTENT_ROW_DP * density);
+                if (Math.abs(dy) > 2 * density) {
+                    if (!animations || reducedMotion) grid.scrollBy(0, dy);
+                    else grid.smoothScrollBy(0, dy);
+                }
+                for (int i = 0; i < contentRows.rowCount(); i++) {
+                    fadeTo(contentRows.rowView(i), i < row ? 0f : 1f, 220);
+                }
+            }
+            // The hero waits until focus rests, so scrolling along a row stays smooth.
+            if (pendingHero != null) handler.removeCallbacks(pendingHero);
+            if (!heroOn) return;
+            pendingHero = () -> {
+                if (kind == ContentRows.KIND_STREMIO) {
+                    movieHero.showMovie((HomeFeeds.Movie) item);
+                } else if (kind == ContentRows.KIND_TV) {
+                    movieHero.showChannel((NowOnTv.Channel) item);
+                } else {
+                    String code = HomeFeeds.country(homeSettings);
+                    boolean yt = HomeFeeds.SOURCE_YOUTUBE.equals(HomeFeeds.source(homeSettings)) && HomeFeeds.hasChannels(code);
+                    movieHero.showNews((HomeFeeds.News) item, HomeFeeds.countryName(code), yt);
+                }
+            };
+            handler.postDelayed(pendingHero, 400);
+        }
+
+        @Override
+        public void onCardClicked(int kind, Object item) {
+            openContent(kind, item);
+        }
+
+        @Override
+        public void onRowExit(int rowPosition, boolean up) {
+            if (up) {
+                if (rowPosition > 0) contentRows.focusRow(rowPosition - 1);
+                else focusTile(Math.min(lastDockCol, COLUMNS - 1));
+                grid.playSoundEffect(SoundEffectConstants.NAVIGATION_UP);
+            } else {
+                if (rowPosition < contentRows.rowCount() - 1) contentRows.focusRow(rowPosition + 1);
+                else if (adapter.appCount() > COLUMNS) focusTile(COLUMNS);
+                grid.playSoundEffect(SoundEffectConstants.NAVIGATION_DOWN);
+            }
+        }
+    };
+
+    /** A content card has focus: the clock, buttons, dock and app shelf step aside for the hero. */
+    private void enterContentMode() {
+        if (contentMode) return;
+        contentMode = true;
+        hidePillLabel();
+        fadeTo(headerBlock, 0f, 260);
+        fadeTo(hero, 0f, 200);
+        heroShown = false;
+        if (ambientGlow) fadeTo(ambient, 0f, 300);
+        fadeTo(contentRows, 1f, 200);
+        dimOthers();
+        // Nothing of the grid shows above the rows: the dock slides away under a clip line.
+        View wrapper = (View) grid.getParent();
+        Rect w = new Rect(0, 0, wrapper.getWidth(), wrapper.getHeight());
+        root.offsetDescendantRectToMyCoords(wrapper, w);
+        int clipTop = Math.round(MIN_CONTENT_ROW_DP * density) - w.top - Math.round(10 * density);
+        wrapper.setClipBounds(new Rect(0, Math.max(0, clipTop), wrapper.getWidth(), wrapper.getHeight()));
+    }
+
+    /** Focus went back to a tile: the hero goes; the rows show under the dock, or step aside for the grid. */
+    private void leaveContentMode(boolean dock) {
+        if (contentRows == null) return;
+        if (pendingHero != null) handler.removeCallbacks(pendingHero);
+        movieHero.hide();
+        if (contentMode) {
+            contentMode = false;
+            for (int i = 0; i < contentRows.rowCount(); i++) fadeTo(contentRows.rowView(i), 1f, 200);
+            dimOthers();
+        }
+        // Cards take focus only when sent there; new data that waited while they had it goes in now.
+        contentRows.release();
+        fadeTo(contentRows, dock ? 1f : 0f, 220);
+    }
+
+    /** Fades a view or a group (a row of cards, the rows). */
+    private void fadeTo(View v, float alpha, int ms) {
+        if (v.getAlpha() == alpha) return;
+        v.animate().cancel();
+        if (!animations) v.setAlpha(alpha);
+        else v.animate().alpha(alpha).setDuration(reducedMotion ? Math.min(ms, 120) : ms).start();
+    }
+
+    /** OK on a card: the title in Stremio, the video in YouTube, a story in the browser. */
+    private void openContent(int kind, Object item) {
+        Intent i;
+        if (kind == ContentRows.KIND_STREMIO) {
+            HomeFeeds.Movie m = (HomeFeeds.Movie) item;
+            i = new Intent(Intent.ACTION_VIEW, Uri.parse(m.deepLink())).setPackage("com.stremio.one");
+            if (i.resolveActivity(getPackageManager()) == null) {
+                i = getPackageManager().getLeanbackLaunchIntentForPackage("com.stremio.one");
+            }
+        } else if (kind == ContentRows.KIND_TV) {
+            // That channel in the TV's own Live TV app.
+            i = new Intent(Intent.ACTION_VIEW).setDataAndType(((NowOnTv.Channel) item).uri(), "vnd.android.cursor.item/channel");
+            if (!liveTvPkg.isEmpty()) {
+                Intent own = new Intent(i).setPackage(liveTvPkg);
+                if (own.resolveActivity(getPackageManager()) != null) i = own;
+            }
+            if (i.resolveActivity(getPackageManager()) == null) i = liveTvIntent();
+        } else {
+            HomeFeeds.News n = (HomeFeeds.News) item;
+            i = new Intent(Intent.ACTION_VIEW, Uri.parse(n.link));
+            if (n.videoId != null) {
+                Intent yt = new Intent(i).setPackage("com.google.android.youtube.tv");
+                if (yt.resolveActivity(getPackageManager()) != null) i = yt;
+            }
+        }
+        if (i == null) {
+            Toast.makeText(this, R.string.not_available, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        open(i);
+    }
+
+    /** Reads the guide again (off the main thread); the row hides itself when there is nothing to show. */
+    private void loadNowOnTv() {
+        if (nowOnTv == null) return;
+        nowOnTv.load(channels -> {
+            if (!isDestroyed() && contentRows != null) contentRows.setNowOnTv(channels);
+        });
+    }
+
+    // ---- weather forecast panel ------------------------------------------------------------------
+
+    /** The weather in the date line takes focus once there is weather to show: Left from the first round button. */
+    private void setUpWeatherFocus() {
+        int padH = Math.round(8 * density), padV = Math.round(3 * density);
+        subLine.setPadding(padH, padV, padH, padV);
+        LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) subLine.getLayoutParams();
+        lp.width = ViewGroup.LayoutParams.WRAP_CONTENT;
+        lp.setMarginStart(lp.getMarginStart() - padH);
+        lp.topMargin -= padV;
+        subLine.setLayoutParams(lp);
+        android.graphics.drawable.GradientDrawable pill = new android.graphics.drawable.GradientDrawable();
+        pill.setColor(0x2EFFFFFF);
+        pill.setStroke(Math.max(1, Math.round(1.5f * density)), 0xCCFFFFFF);
+        pill.setCornerRadius(99 * density);
+        android.graphics.drawable.StateListDrawable bg = new android.graphics.drawable.StateListDrawable();
+        bg.addState(new int[]{android.R.attr.state_focused}, pill);
+        subLine.setBackground(bg);
+        subLine.setOnClickListener(v -> showForecast());
+        subLine.setOnFocusChangeListener((v, focused) -> {
+            subLine.setTextColor(focused ? 0xFFFFFFFF : 0x99FFFFFF);
+            if (focused) hidePillLabel();
+        });
+        subLine.setOnKeyListener((v, keyCode, event) -> {
+            if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+            switch (keyCode) {
+                case KeyEvent.KEYCODE_DPAD_RIGHT:
+                    btnControl.requestFocus();
+                    return true;
+                case KeyEvent.KEYCODE_DPAD_DOWN:
+                    focusTile(lastFocused % COLUMNS);
+                    return true;
+                case KeyEvent.KEYCODE_DPAD_UP:
+                case KeyEvent.KEYCODE_DPAD_LEFT:
+                    return true;
+                default:
+                    return false;
+            }
+        });
+        updateWeatherFocus();
+    }
+
+    private void updateWeatherFocus() {
+        if (subLine == null) return;
+        boolean on = weather != null && homeSettings != null && HomeFeeds.on(homeSettings, HomeFeeds.WEATHER_ON);
+        if (!on && subLine.isFocused()) btnControl.requestFocus();
+        subLine.setFocusable(on);
+    }
+
+    /** OK on the weather: now, and the next 5 days, in a panel under it. Any button closes it. */
+    private void showForecast() {
+        if (weather == null) return;
+        if (openPopup != null) openPopup.dismiss();
+        View panel = getLayoutInflater().inflate(R.layout.popup_inputs, root, false);
+        LinearLayout rows = panel.findViewById(R.id.rows);
+        int width = Math.round(430 * density);
+        PopupWindow popup = glassPopup(panel, width);
+        forecastPopup = popup;
+        android.graphics.Typeface light = getResources().getFont(R.font.outfit_light);
+        android.graphics.Typeface regular = getResources().getFont(R.font.outfit_regular);
+        android.graphics.Typeface medium = getResources().getFont(R.font.outfit_medium);
+        int pad = Math.round(14 * density);
+        rows.setPadding(pad, Math.round(10 * density), pad, Math.round(12 * density));
+
+        // Now: icon, temperature and condition; feels like, wind and rain; high and low.
+        rows.addView(wxText(getString(R.string.wx_now).toUpperCase(Locale.getDefault()) + "  \u00B7  " + weather.city,
+                10f, medium, 0x99FFFFFF, 0.14f));
+        LinearLayout now = new LinearLayout(this);
+        now.setOrientation(LinearLayout.HORIZONTAL);
+        now.setGravity(Gravity.CENTER_VERTICAL);
+        ImageView icon = new ImageView(this);
+        icon.setImageResource(weatherIcon(weather.code, weather.day));
+        int is = Math.round(44 * density);
+        now.addView(icon, new LinearLayout.LayoutParams(is, is));
+        TextView temp = wxText(weather.temperature + "\u00B0", 40f, light, 0xFFFFFFFF, 0f);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        tlp.setMarginStart(Math.round(10 * density));
+        now.addView(temp, tlp);
+        LinearLayout side = new LinearLayout(this);
+        side.setOrientation(LinearLayout.VERTICAL);
+        side.addView(wxText(conditionName(weather.code), 15f, medium, 0xFFFFFFFF, 0f));
+        if (weather.high > -1000) side.addView(wxText(getString(R.string.wx_high_low, weather.high, weather.low), 12f, regular, 0xB3FFFFFF, 0f));
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        slp.setMarginStart(Math.round(14 * density));
+        now.addView(side, slp);
+        LinearLayout.LayoutParams nlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        nlp.topMargin = Math.round(6 * density);
+        rows.addView(now, nlp);
+        StringBuilder details = new StringBuilder();
+        if (weather.feels > -1000) details.append(getString(R.string.wx_feels, weather.feels));
+        if (weather.wind > -1000) details.append(details.length() > 0 ? "   \u00B7   " : "").append(getString(R.string.wx_wind, weather.wind));
+        if (weather.rain >= 0) details.append(details.length() > 0 ? "   \u00B7   " : "").append(getString(R.string.wx_rain, weather.rain));
+        if (details.length() > 0) {
+            TextView d = wxText(details.toString(), 12f, regular, 0xD9FFFFFF, 0f);
+            LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            dlp.topMargin = Math.round(8 * density);
+            rows.addView(d, dlp);
+        }
+
+        // The next 5 days, side by side.
+        if (!weather.days.isEmpty()) {
+            View line = new View(this);
+            line.setBackgroundColor(0x1FFFFFFF);
+            LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, Math.round(density)));
+            llp.topMargin = Math.round(12 * density);
+            llp.bottomMargin = Math.round(10 * density);
+            rows.addView(line, llp);
+            rows.addView(wxText(getString(R.string.wx_next_days), 10f, medium, 0x99FFFFFF, 0.14f));
+            LinearLayout strip = new LinearLayout(this);
+            strip.setOrientation(LinearLayout.HORIZONTAL);
+            java.text.SimpleDateFormat parse = new java.text.SimpleDateFormat("yyyy-MM-dd", Locale.ROOT);
+            java.text.SimpleDateFormat dayName = new java.text.SimpleDateFormat("EEE", Locale.getDefault());
+            for (HomeFeeds.Day day : weather.days) {
+                LinearLayout col = new LinearLayout(this);
+                col.setOrientation(LinearLayout.VERTICAL);
+                col.setGravity(Gravity.CENTER_HORIZONTAL);
+                String name = day.date;
+                try {
+                    name = dayName.format(parse.parse(day.date));
+                } catch (Exception ignored) {
+                }
+                col.addView(wxText(name, 12f, medium, 0xE6FFFFFF, 0f));
+                ImageView di = new ImageView(this);
+                di.setImageResource(weatherIcon(day.code, true));
+                int ds = Math.round(26 * density);
+                LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(ds, ds);
+                ilp.topMargin = Math.round(6 * density);
+                ilp.bottomMargin = Math.round(4 * density);
+                col.addView(di, ilp);
+                col.addView(wxText(day.high + "\u00B0", 14f, medium, 0xFFFFFFFF, 0f));
+                col.addView(wxText(day.low + "\u00B0", 12f, regular, 0x8CFFFFFF, 0f));
+                // Rain only when it is likely enough to matter.
+                col.addView(wxText(day.rain >= 30 ? day.rain + "%" : " ", 11f, medium, 0xFF7CC4FF, 0f));
+                strip.addView(col, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            }
+            LinearLayout.LayoutParams stlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            stlp.topMargin = Math.round(8 * density);
+            rows.addView(strip, stlp);
+        }
+
+        // Any button closes it (the key is used up, so it does nothing else); focus stays on the weather.
+        panel.setFocusable(true);
+        panel.setFocusableInTouchMode(true);
+        panel.setOnKeyListener((v, keyCode, event) -> {
+            if (event.getAction() == KeyEvent.ACTION_DOWN) popup.dismiss();
+            return true;
+        });
+        popup.setOnDismissListener(() -> {
+            if (openPopup == popup) openPopup = null;
+            if (forecastPopup == popup) forecastPopup = null;
+        });
+        hidePillLabel();
+        dropIn(popup, panel, subLine, Gravity.START);
+        panel.requestFocus();
+    }
+
+    private TextView wxText(String text, float sp, android.graphics.Typeface tf, int color, float spacing) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
+        t.setTypeface(tf);
+        t.setTextColor(color);
+        t.setLetterSpacing(spacing);
+        t.setSingleLine(true);
+        t.setIncludeFontPadding(false);
+        t.setPadding(0, Math.round(2 * density), 0, Math.round(2 * density));
+        return t;
+    }
+
+    /** Open-Meteo's weather code in words. */
+    private String conditionName(int code) {
+        int id;
+        if (code == 0) id = R.string.wx_clear;
+        else if (code == 1) id = R.string.wx_mainly_clear;
+        else if (code == 2) id = R.string.wx_partly;
+        else if (code == 3) id = R.string.wx_cloudy;
+        else if (code == 45 || code == 48) id = R.string.wx_fog;
+        else if (code >= 51 && code <= 57) id = R.string.wx_drizzle;
+        else if (code >= 61 && code <= 67) id = R.string.wx_rain_text;
+        else if (code >= 71 && code <= 77 || code == 85 || code == 86) id = R.string.wx_snow;
+        else if (code >= 80 && code <= 82) id = R.string.wx_showers;
+        else if (code >= 95) id = R.string.wx_storm;
+        else id = R.string.wx_cloudy;
+        return getString(id);
+    }
+
+    /** Open-Meteo's weather code as one of the date line's icons. */
+    private static int weatherIcon(int code, boolean day) {
+        if (code == 0 || code == 1) return day ? R.drawable.wx_sun : R.drawable.wx_moon;
+        if (code == 2) return R.drawable.wx_partly;
+        if (code == 3) return R.drawable.wx_cloud;
+        if (code == 45 || code == 48) return R.drawable.wx_fog;
+        if (code >= 71 && code <= 77 || code == 85 || code == 86) return R.drawable.wx_snow;
+        if (code >= 95) return R.drawable.wx_storm;
+        return R.drawable.wx_rain;
+    }
+
+    // ---- inputs dropdown (minimal home) ----------------------------------------------------------
+
+    /**
+     * Minimal home's Inputs dropdown, in the Control center's style: Live TV, each HDMI port (eARC or ARC where the
+     * TV reports it) and AV, with the device name from the TV's input settings under each, WATCHING on the current
+     * one and a Connected dot or Empty on the right. Switching is the classic menu's (openInput, Live TV's intent).
+     * This TV reports an empty HDMI port as standby, so only a connected port counts as Connected; OK on an Empty
+     * one shows No signal, and a second OK switches anyway, in case a device the TV does not report is there.
+     */
+    private void showInputMenu() {
+        View anchor = findViewById(R.id.btnInputs);
+        View panel = getLayoutInflater().inflate(R.layout.popup_inputs, root, false);
+        LinearLayout rows = panel.findViewById(R.id.rows);
+        int width = Math.round(360 * density);
+        PopupWindow popup = glassPopup(panel, width);
+        hidePillLabel();
+        String current = systemProperty("persist.sys.curInput");
+        if (current.isEmpty()) current = systemProperty("sys.tcl.inputid");
+        Log.i(TAG, "inputs: current=" + current);
+        TvInputManager tim = (TvInputManager) getSystemService(TV_INPUT_SERVICE);
+        List<TvInputInfo> inputs = tim == null ? new ArrayList<>() : new ArrayList<>(tim.getTvInputList());
+
+        // Live TV: the hardware tuner the classic menu picks, tuned through the Live TV package when it takes that.
+        String tunerId = null;
+        boolean tunerHw = false, tunerAnalog = false;
+        for (TvInputInfo info : inputs) {
+            if (info.getType() != TvInputInfo.TYPE_TUNER
+                    || (info.getServiceInfo().applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) == 0) continue;
+            boolean hw = info.getId().matches(".*/HW\\d+$");
+            boolean analog = info.getId().toLowerCase(Locale.ROOT).contains("analog");
+            if (tunerId == null || (hw && !tunerHw) || (hw == tunerHw && tunerAnalog && !analog)
+                    || (hw == tunerHw && analog == tunerAnalog && info.getId().compareTo(tunerId) < 0)) {
+                tunerId = info.getId();
+                tunerHw = hw;
+                tunerAnalog = analog;
+            }
+        }
+        Intent liveTv = liveTvIntent();
+        if (liveTv != null && tunerId != null) {
+            Intent tuned = new Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(TvContract.buildChannelUriForPassthroughInput(tunerId), "vnd.android.cursor.item/channel")
+                    .setPackage(liveTvPkg);
+            if (tuned.resolveActivity(getPackageManager()) != null) liveTv = tuned;
+        }
+        if (liveTv != null) {
+            boolean watching = false;
+            for (TvInputInfo info : inputs) {
+                if (info.getType() == TvInputInfo.TYPE_TUNER && info.getId().equals(current)) watching = true;
+            }
+            final Intent open = liveTv;
+            addInputMenuRow(rows, popup, R.drawable.ic_livetv, getString(R.string.live_tv), null,
+                    getString(R.string.in_tv_channels), watching, 0, () -> open(open));
+        }
+
+        // Ports: an HDMI-CEC device has an input of its own whose parent is its port.
+        Set<String> ids = new HashSet<>();
+        for (TvInputInfo info : inputs) ids.add(info.getId());
+        Map<String, TvInputInfo> deviceOnPort = new HashMap<>();
+        for (TvInputInfo info : inputs) {
+            String parent = info.getParentId();
+            if (parent != null && ids.contains(parent) && info.isPassthroughInput() && !info.isHidden(this)) {
+                deviceOnPort.put(parent, info);
+            }
+        }
+        List<TvInputInfo> ports = new ArrayList<>();
+        for (TvInputInfo info : inputs) {
+            if (!info.isPassthroughInput() || info.isHidden(this)) continue;
+            if (info.getParentId() != null && ids.contains(info.getParentId())) continue;
+            ports.add(info);
+        }
+        // HDMI in port order, then AV and the rest.
+        Collections.sort(ports, (a, b) -> {
+            boolean ha = a.getType() == TvInputInfo.TYPE_HDMI, hb = b.getType() == TvInputInfo.TYPE_HDMI;
+            if (ha != hb) return ha ? -1 : 1;
+            return Integer.compare(portNumber(inputLabel(a)), portNumber(inputLabel(b)));
+        });
+        int[] arcPorts = arcPorts();
+        for (TvInputInfo info : ports) {
+            boolean hdmi = info.getType() == TvInputInfo.TYPE_HDMI;
+            String label = inputLabel(info);
+            if (hdmi && !label.toUpperCase(Locale.ROOT).contains("HDMI")) label = "HDMI " + label;
+            TvInputInfo device = deviceOnPort.get(info.getId());
+            CharSequence custom = info.loadCustomLabel(this);
+            String name = custom != null && custom.length() > 0 && !custom.toString().equals(label) ? custom.toString() : null;
+            if (name == null && device != null) {
+                CharSequence d = device.loadCustomLabel(this);
+                if (d == null || d.length() == 0) d = device.loadLabel(this);
+                if (d != null && d.length() > 0) name = d.toString();
+            }
+            String id = device != null ? device.getId() : info.getId();
+            boolean watching = current.equals(info.getId()) || (device != null && current.equals(device.getId()));
+            // Analog AV has no hotplug detection: no state is shown for it.
+            int state = 0;
+            if (hdmi) {
+                boolean connected = device != null || tim.getInputState(info.getId()) == TvInputManager.INPUT_STATE_CONNECTED;
+                state = connected ? 1 : -1;
+            }
+            Log.i(TAG, "inputs: " + info.getId() + " label=" + label + " state=" + tim.getInputState(info.getId())
+                    + " custom=" + custom);
+            String tag = hdmi ? arcTag(label, arcPorts) : null;
+            String sub = name != null ? name : getString(state < 0 ? R.string.not_connected : R.string.in_no_device);
+            addInputMenuRow(rows, popup, hdmi ? R.drawable.ic_input : R.drawable.ic_av, stripArc(label), tag, sub,
+                    watching, state, () -> openInput(id));
+        }
+        if (rows.getChildCount() == 0) {
+            Toast.makeText(this, R.string.no_inputs, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        popup.setOnDismissListener(() -> {
+            if (openPopup == popup) openPopup = null;
+            if (btnInputs.isFocused()) showPillLabel((TextView) btnInputs);
+        });
+        panel.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY), View.MeasureSpec.UNSPECIFIED);
+        // Hangs under the Inputs button, its right edge on the button's, so it stays on screen.
+        dropIn(popup, panel, anchor, Gravity.END);
+        View first = rows.getChildAt(0);
+        for (int i = 0; i < rows.getChildCount(); i++) {
+            if (rows.getChildAt(i).findViewById(R.id.watching).getVisibility() == View.VISIBLE) first = rows.getChildAt(i);
+        }
+        first.requestFocus();
+    }
+
+    /**
+     * state: 1 Connected (green dot), -1 Empty (faded; OK shows No signal first), 0 nothing shown.
+     */
+    private void addInputMenuRow(LinearLayout rows, PopupWindow popup, int icon, String title, String tag, String sub,
+                                 boolean watching, int state, Runnable action) {
+        View row = getLayoutInflater().inflate(R.layout.item_input_rich, rows, false);
+        ((ImageView) row.findViewById(R.id.icon)).setImageResource(icon);
+        ((TextView) row.findViewById(R.id.title)).setText(title);
+        TextView tagView = row.findViewById(R.id.tag);
+        if (tag != null) {
+            tagView.setText(tag);
+            tagView.setVisibility(View.VISIBLE);
+        }
+        ((TextView) row.findViewById(R.id.subtitle)).setText(sub);
+        row.findViewById(R.id.watching).setVisibility(watching ? View.VISIBLE : View.GONE);
+        TextView status = row.findViewById(R.id.status);
+        row.findViewById(R.id.dot).setVisibility(state > 0 ? View.VISIBLE : View.GONE);
+        status.setText(state > 0 ? getString(R.string.connected) : state < 0 ? getString(R.string.in_empty) : "");
+        status.setVisibility(state == 0 ? View.GONE : View.VISIBLE);
+        float rest = state < 0 && !watching ? 0.45f : 1f;
+        row.setAlpha(rest);
+        row.setOnFocusChangeListener((v, focused) -> v.setAlpha(focused ? 1f : rest));
+        final boolean[] warned = {false};
+        final Runnable unwarn = () -> {
+            warned[0] = false;
+            status.setText(R.string.in_empty);
+        };
+        row.setOnClickListener(v -> {
+            if (state < 0 && !warned[0]) {
+                // Empty: say so instead of switching to a black screen; a second OK switches anyway.
+                warned[0] = true;
+                status.setText(R.string.in_no_signal);
+                handler.removeCallbacks(unwarn);
+                handler.postDelayed(unwarn, 4000);
+                return;
+            }
+            handler.removeCallbacks(unwarn);
+            popup.dismiss();
+            action.run();
+        });
+        rows.addView(row);
+    }
+
+    private String inputLabel(TvInputInfo info) {
+        CharSequence l = info.loadLabel(this);
+        return l == null || l.length() == 0 ? info.getId() : l.toString();
+    }
+
+    /** The port number in a label ("HDMI 2" is 2), or a large number to sort labels without one last. */
+    private static int portNumber(String label) {
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d+)").matcher(label);
+        return m.find() ? Integer.parseInt(m.group(1)) : 99;
+    }
+
+    /** "eARC" or "ARC" when the label says so or the TV lists the port as an ARC port, else null. */
+    private String arcTag(String label, int[] arcPorts) {
+        String u = label.toUpperCase(Locale.ROOT);
+        if (u.contains("EARC")) return "eARC";
+        if (u.contains("ARC")) return "ARC";
+        int port = portNumber(label);
+        for (int p : arcPorts) {
+            if (p == port) return earcCapable() ? "eARC" : "ARC";
+        }
+        return null;
+    }
+
+    private static String stripArc(String label) {
+        return label.replaceAll("(?i)\\s*[(\\[]?\\s*\\be?arc\\b\\s*[)\\]]?", "").trim();
+    }
+
+    /** HDMI ports the TV marks as ARC (HdmiControlManager's port list); empty when it does not let us read it. */
+    private int[] arcPorts() {
+        try {
+            Object hdmi = getSystemService("hdmi_control");
+            if (hdmi == null) return new int[0];
+            List<?> ports = (List<?>) hdmi.getClass().getMethod("getPortInfo").invoke(hdmi);
+            List<Integer> arc = new ArrayList<>();
+            for (Object p : ports) {
+                if ((Boolean) p.getClass().getMethod("isArcSupported").invoke(p)) {
+                    arc.add((Integer) p.getClass().getMethod("getId").invoke(p));
+                }
+            }
+            int[] out = new int[arc.size()];
+            for (int i = 0; i < out.length; i++) out[i] = arc.get(i);
+            Log.i(TAG, "inputs: arc ports " + arc);
+            return out;
+        } catch (Throwable t) {
+            Log.i(TAG, "inputs: no HDMI port list: " + t);
+            return new int[0];
+        }
+    }
+
+    /** The TV keeps eARC settings (TCL's earc_control_enabled): its ARC port is an eARC one. */
+    private boolean earcCapable() {
+        return Settings.Global.getString(getContentResolver(), "earc_control_enabled") != null;
+    }
+
+    private static String systemProperty(String key) {
+        try {
+            Object v = Class.forName("android.os.SystemProperties").getMethod("get", String.class).invoke(null, key);
+            return v == null ? "" : v.toString();
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    // ---- all apps page ---------------------------------------------------------------------------
+
+    /** The All apps page over Home; Home's own views step out of the way so nothing under it takes focus. */
+    private void showAllApps() {
+        if (openPopup != null) openPopup.dismiss();
+        if (allApps == null) allApps = new AllAppsPage(this, allAppsHost, allAppsColumns, animations);
+        if (allApps.showing()) return;
+        hidePillLabel();
+        ((View) headerBlock.getParent()).setVisibility(View.INVISIBLE);
+        if (contentRows != null) contentRows.setVisibility(View.INVISIBLE);
+        allApps.show(root);
+    }
+
+    private final AllAppsPage.Host allAppsHost = new AllAppsPage.Host() {
+        @Override
+        public boolean inDock(String pkg) {
+            int pos = adapter.positionOf(adapter.keyOfPackage(pkg));
+            return pos >= 0 && pos < adapter.appCount();
+        }
+
+        @Override
+        public boolean onHome(String pkg) {
+            return adapter.keyOfPackage(pkg) != null;
+        }
+
+        /** Into the first free dock slot, or the last one: the app there moves out to the next place. */
+        @Override
+        public void addToDock(String pkg) {
+            if (adapter.keyOfPackage(pkg) == null) {
+                // Not a Home app yet (a phone app, or one hidden from Home): make it one first.
+                if (!LibraryApps.save(MainActivity.this, pkg, true)) {
+                    Toast.makeText(MainActivity.this, R.string.library_save_failed, Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                reloadApps(false);
+            }
+            String key = adapter.keyOfPackage(pkg);
+            if (key == null) {
+                Toast.makeText(MainActivity.this, R.string.all_apps_dock_failed, Toast.LENGTH_SHORT).show();
+                return;
+            }
+            List<String> keys = adapter.movableKeys();
+            keys.remove(key);
+            keys.add(Math.min(Math.min(adapter.dockFilled(), COLUMNS - 1), keys.size()), key);
+            saveHomeOrder(keys);
+        }
+
+        /** Just after the dock: the next app in the order takes its slot. */
+        @Override
+        public void removeFromDock(String pkg) {
+            String key = adapter.keyOfPackage(pkg);
+            if (key == null) return;
+            List<String> keys = adapter.movableKeys();
+            keys.remove(key);
+            keys.add(Math.min(COLUMNS, keys.size()), key);
+            saveHomeOrder(keys);
+        }
+
+        @Override
+        public void setOnHome(String pkg, boolean on) {
+            if (!LibraryApps.save(MainActivity.this, pkg, on)) {
+                Toast.makeText(MainActivity.this, R.string.library_save_failed, Toast.LENGTH_SHORT).show();
+                return;
+            }
+            reloadApps(false);
+        }
+
+        @Override
+        public void closed() {
+            ((View) headerBlock.getParent()).setVisibility(View.VISIBLE);
+            if (contentRows != null) contentRows.setVisibility(View.VISIBLE);
+            btnLibraryTop.requestFocus();
+        }
+    };
+
+    /** Saves a new order of the Home apps (the dock is its first COLUMNS) and shows it. */
+    private void saveHomeOrder(List<String> keys) {
+        Order order = new Order(Order.dockKey(dockApps), keys);
+        if (!Order.save(Order.file(this), order)) {
+            Toast.makeText(this, R.string.reorder_not_saved, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        adapter.setSavedOrder(Order.ranks(order, dockApps));
+        reloadApps(false);
+    }
+
+    // ---- control center --------------------------------------------------------------------------
+
+    /** The Control center dropdown under its button: sleep timer, turn off, free memory, sound output, screensaver. */
+    private void showControlCenter() {
+        View panel = getLayoutInflater().inflate(R.layout.popup_inputs, root, false);
+        LinearLayout rows = panel.findViewById(R.id.rows);
+        PopupWindow popup = glassPopup(panel, (int) (260 * density));
+        hidePillLabel();
+        TextView[] values = new TextView[5];
+        values[0] = addControlRow(rows, popup, R.string.cc_sleep_timer, false, () -> {
+            int cur = SleepTimer.chosen(this);
+            int next = 0;
+            for (int i = 0; i < SleepTimer.CHOICES.length; i++) {
+                if (SleepTimer.CHOICES[i] == cur) next = SleepTimer.CHOICES[(i + 1) % SleepTimer.CHOICES.length];
+            }
+            SleepTimer.set(this, next);
+            Toast.makeText(this, next > 0 ? getString(R.string.cc_timer_set, next) : getString(R.string.cc_timer_off),
+                    Toast.LENGTH_SHORT).show();
+            updateCcBadge();
+            fillControlValues(values);
+        });
+        values[1] = addControlRow(rows, popup, R.string.cc_turn_off, true, () -> SleepTimer.sleep(this));
+        values[2] = addControlRow(rows, popup, R.string.cc_free_memory, false, () -> freeMemory(values));
+        values[3] = addControlRow(rows, popup, R.string.cc_sound_output, true,
+                () -> open(systemIntent(Settings.ACTION_SOUND_SETTINGS)));
+        values[4] = addControlRow(rows, popup, R.string.cc_screensaver, true,
+                () -> startActivity(new Intent(this, ClockActivity.class)));
+        fillControlValues(values);
+        popup.setOnDismissListener(() -> {
+            if (openPopup == popup) openPopup = null;
+            if (btnControl.isFocused()) showPillLabel(btnControl);
+        });
+        panel.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+        popup.setWidth(Math.max((int) (260 * density), panel.getMeasuredWidth()));
+        // Hangs under the button row, right-aligned with its end, so it never runs off the screen.
+        dropIn(popup, panel, topButtons, Gravity.END);
+        rows.getChildAt(0).requestFocus();
+    }
+
+    private void fillControlValues(TextView[] values) {
+        int left = SleepTimer.minutesLeft(this);
+        values[0].setText(left > 0 ? getString(R.string.cc_timer_left, left) : getString(R.string.off));
+        values[1].setText("");
+        values[2].setText(getString(R.string.cc_mb_free, availMb()));
+        values[3].setText(soundOutputName());
+        values[4].setText(R.string.cc_clock);
+    }
+
+    /** One row: title on the left, its value on the right. closes: OK also closes the menu. */
+    private TextView addControlRow(LinearLayout rows, PopupWindow popup, int title, boolean closes, Runnable action) {
+        View row = getLayoutInflater().inflate(R.layout.item_input, rows, false);
+        row.findViewById(R.id.icon).setVisibility(View.GONE);
+        row.findViewById(R.id.dot).setVisibility(View.GONE);
+        TextView status = row.findViewById(R.id.status);
+        status.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+        ((TextView) row.findViewById(R.id.title)).setText(title);
+        row.setOnClickListener(v -> {
+            if (closes) popup.dismiss();
+            action.run();
+        });
+        rows.addView(row);
+        return status;
+    }
+
+    private long availMb() {
+        android.app.ActivityManager am = getSystemService(android.app.ActivityManager.class);
+        android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo();
+        if (am == null) return 0;
+        am.getMemoryInfo(mi);
+        return mi.availMem / (1024 * 1024);
+    }
+
+    /** Closes the apps running in the background (never this one or the one on screen), then reports what that freed. */
+    private void freeMemory(TextView[] values) {
+        long before = availMb();
+        android.app.ActivityManager am = getSystemService(android.app.ActivityManager.class);
+        if (am == null) return;
+        new Thread(() -> {
+            for (ApplicationInfo ai : getPackageManager().getInstalledApplications(0)) {
+                if (ai.packageName.equals(getPackageName())) continue;
+                try {
+                    am.killBackgroundProcesses(ai.packageName);
+                } catch (SecurityException ignored) {
+                }
+            }
+            try {
+                Thread.sleep(800);   // let the memory figures catch up
+            } catch (InterruptedException ignored) {
+            }
+            handler.post(() -> {
+                if (isDestroyed()) return;
+                long freed = availMb() - before;
+                Toast.makeText(this, freed > 0 ? getString(R.string.cc_freed, freed) : getString(R.string.cc_freed_none),
+                        Toast.LENGTH_SHORT).show();
+                fillControlValues(values);
+            });
+        }, "free-memory").start();
+    }
+
+    /** Where the sound most likely plays: a Bluetooth or USB device, the ARC soundbar, or the TV's speakers. */
+    private String soundOutputName() {
+        android.media.AudioManager am = getSystemService(android.media.AudioManager.class);
+        if (am == null) return getString(R.string.cc_open);
+        boolean arc = false, usb = false;
+        for (android.media.AudioDeviceInfo d : am.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS)) {
+            switch (d.getType()) {
+                case android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
+                    return getString(R.string.sound_bluetooth);
+                case android.media.AudioDeviceInfo.TYPE_HDMI_ARC:
+                case 29:   // TYPE_HDMI_EARC, Android 12
+                    arc = true;
+                    break;
+                case android.media.AudioDeviceInfo.TYPE_USB_DEVICE:
+                case android.media.AudioDeviceInfo.TYPE_USB_HEADSET:
+                    usb = true;
+                    break;
+                default:
+            }
+        }
+        return getString(usb ? R.string.sound_usb : arc ? R.string.sound_arc : R.string.sound_tv_speakers);
     }
 }

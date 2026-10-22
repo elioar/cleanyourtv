@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Red status dot on the network button: the VPN app is installed but no VPN is up. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
+    <solid android:color="#FFFF453A" />
+    <stroke android:width="2dp" android:color="#FF000000" />
+</shape>

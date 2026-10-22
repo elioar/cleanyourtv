@@ -223,6 +223,7 @@
                         android:textAllCaps="true" />
 
                     <View
+                        android:id="@+id/dateSep"
                         android:layout_width="1dp"
                         android:layout_height="26dp"
                         android:layout_gravity="bottom"
@@ -232,6 +233,7 @@
                         android:background="#33FFFFFF" />
 
                     <LinearLayout
+                        android:id="@+id/dateColumn"
                         android:layout_width="0dp"
                         android:layout_weight="1"
                         android:layout_height="wrap_content"
@@ -273,6 +275,22 @@
                     </LinearLayout>
                 </LinearLayout>
 
+                <!-- Minimal home: "Wednesday 21 October · 19° · Thessaloniki" under the clock. -->
+                <TextView
+                    android:id="@+id/subLine"
+                    android:gravity="left"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="2dp"
+                    android:layout_marginTop="8dp"
+                    android:singleLine="true"
+                    android:ellipsize="end"
+                    android:textColor="#99FFFFFF"
+                    android:textSize="13sp"
+                    android:fontFamily="@font/outfit_regular"
+                    android:letterSpacing="0.02"
+                    android:visibility="gone" />
+
             </LinearLayout>
 
             <!-- Shown only when show_stats is on. Outside leftBlock, so the top buttons stay level with the clock
@@ -304,6 +322,14 @@
                 android:clipChildren="false"
                 android:clipToPadding="false"
                 android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/btnControl"
+                    style="@style/TopButtonIcon"
+                    android:visibility="gone"
+                    android:contentDescription="@string/control_center"
+                    android:drawableStart="@drawable/ic_tune"
+                    android:nextFocusDown="@+id/grid" />
 
                 <TextView
                     android:id="@+id/btnInputs"
@@ -374,4 +400,43 @@
         android:layout_height="10dp"
         android:alpha="0"
         android:importantForAccessibility="no" />
+
+    <!-- Minimal home: the focused round button's name, placed under it in code. -->
+    <TextView
+        android:id="@+id/pillLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:singleLine="true"
+        android:textColor="#D9FFFFFF"
+        android:textSize="11sp"
+        android:fontFamily="@font/outfit_regular"
+        android:alpha="0"
+        android:importantForAccessibility="no"
+        android:visibility="gone" />
+
+    <!-- Minimal home: red dot on the network button while the VPN is down. -->
+    <View
+        android:id="@+id/netDot"
+        android:layout_width="11dp"
+        android:layout_height="11dp"
+        android:background="@drawable/net_dot"
+        android:importantForAccessibility="no"
+        android:visibility="gone" />
+
+    <!-- Minimal home: sleep-timer minutes on the Control center button. -->
+    <TextView
+        android:id="@+id/ccBadge"
+        android:layout_width="wrap_content"
+        android:layout_height="15dp"
+        android:minWidth="18dp"
+        android:paddingStart="4dp"
+        android:paddingEnd="4dp"
+        android:gravity="center"
+        android:background="@drawable/timer_badge"
+        android:textColor="#FFFFFFFF"
+        android:textSize="8sp"
+        android:fontFamily="@font/outfit_medium"
+        android:includeFontPadding="false"
+        android:importantForAccessibility="no"
+        android:visibility="gone" />
 </FrameLayout>

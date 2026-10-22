@@ -73,10 +73,19 @@ final class RemoteKeys {
         return keys;
     }
 
-    /** Opens an app from a remote button: its TV entry if it has one, else its phone entry. */
+    /**
+     * Opens an app from a remote button: its TV entry if it has one, else its phone entry. A target written as
+     * "action:com.tcl.tv.action.EPG" sends that intent action instead, for buttons that opened a screen inside
+     * an app rather than the app itself (the TCL guide button).
+     */
     static void launch(Context ctx, String pkg) {
-        Intent open = ctx.getPackageManager().getLeanbackLaunchIntentForPackage(pkg);
-        if (open == null) open = ctx.getPackageManager().getLaunchIntentForPackage(pkg);
+        Intent open;
+        if (pkg.startsWith("action:")) {
+            open = new Intent(pkg.substring("action:".length()));
+        } else {
+            open = ctx.getPackageManager().getLeanbackLaunchIntentForPackage(pkg);
+            if (open == null) open = ctx.getPackageManager().getLaunchIntentForPackage(pkg);
+        }
         if (open == null) return;
         try {
             ctx.startActivity(open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
